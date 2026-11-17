@@ -1,0 +1,41 @@
+@startuml
+!pragma layout smetana
+!include <C4/C4_Container>
+LAYOUT_TOP_DOWN()
+title Вариант 1: Kafka + PostgreSQL — C4 Container
+Person(customer, "Клиент банка", "Получает сообщение; приложение отправляет ACK")
+System_Ext(bank, "Банковские сервисы", "Собственный transactional outbox")
+System_Ext(providers, "Push / SMS / email", "FCM/APNs и договорные провайдеры")
+System_Boundary(platform, "Notification Platform") {
+  Container(api, "Notification API + Relay", "Kotlin + Spring Boot", "Приём, дедупликация, публикация outbox")
+  ContainerDb(ledger, "Critical Delivery Ledger", "PostgreSQL, sync HA", "Уведомления, попытки, deadlines, inbox/outbox")
+  ContainerQueue(kafka, "Event / Dispatch Log", "Apache Kafka, RF=3", "Critical и bulk topics; квоты")
+  Container(orchestrator, "Critical Orchestrator", "Kotlin + Spring Boot", "Автомат; due scheduler каждые 100 мс")
+  Container(workers, "Channel Workers", "Kotlin + Spring Boot", "Изолированные critical/bulk pools; send preflight")
+  Container(receipts, "Receipt / Reconciliation", "Kotlin + Spring Boot", "Проверка ACK, webhook; уточнение UNKNOWN")
+  Container(policy, "Policy / Contact Service", "Kotlin + Spring Boot", "Настройки и разрешения отправки")
+  ContainerDb(policydb, "Policy / Contact Store", "PostgreSQL HA", "Версии настроек; защищённые контакты")
+  Container(bulk, "Bulk Processor", "Kotlin + Spring Boot", "Потоковое раскрытие кампаний; rate limits")
+  ContainerDb(bulkdb, "Bulk Store", "PostgreSQL HA", "Сервисный и маркетинговый контур отдельно")
+}
+Rel(bank, api, "Передаёт событие", "HTTPS; стабильный event ID")
+Rel(api, ledger, "Принимает critical + outbox", "SQL transaction")
+Rel(api, bulkdb, "Принимает bulk + outbox", "SQL transaction")
+Rel(api, kafka, "Публикует outbox", "acks=all")
+Rel(kafka, orchestrator, "События critical")
+Rel(orchestrator, ledger, "CAS; deadlines; dispatch outbox", "SQL")
+Rel(kafka, workers, "Dispatch-команды")
+Rel(workers, ledger, "Разрешение/результат critical", "SQL")
+Rel(workers, policy, "Проверяет политику/контакт", "HTTPS")
+Rel_D(policy, policydb, "Читает актуальные настройки", "SQL")
+Rel(workers, providers, "Отправляет; status lookup", "HTTPS")
+Rel(providers, customer, "Доставляет сообщение")
+Rel(providers, receipts, "Delivery receipt", "Signed webhook")
+Rel(customer, receipts, "ACK приложения", "Authenticated HTTPS")
+Rel(receipts, ledger, "Inbox + статус + outbox", "SQL transaction")
+Rel(kafka, bulk, "Bulk-события")
+Rel(bulk, bulkdb, "Состояние кампаний", "SQL")
+Rel(bulk, kafka, "Bulk dispatch; через outbox")
+Rel(workers, bulkdb, "Результат bulk", "SQL")
+SHOW_LEGEND()
+@enduml

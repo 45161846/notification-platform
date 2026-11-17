@@ -1,0 +1,50 @@
+@startuml
+title Вариант 2: durable timer → SMS после сбоя worker
+hide footbox
+skinparam defaultFontName SansSerif
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 180
+autonumber
+participant "Temporal Service\nи HA persistence" as T
+participant "Workflow Worker" as WF
+participant "Channel Activity" as A
+database "Critical Ledger" as DB
+participant "Policy Service" as Policy
+participant "Push provider" as Push
+participant "SMS provider" as SMS
+participant "Receipt Receiver\nи Signal Relay" as R
+actor "Клиент" as App
+note over T,App: Push отправлен; ждём ACK до t0+4 с
+A -> Push: Send push attempt P
+Push --> A: Accepted
+A -> DB: WAITING_CONFIRMATION; attempt P
+A -> T: Activity result
+WF -> T: Durable timer: push deadline
+note over WF: Worker падает во время ожидания
+T -> WF: Другой worker: task + replay history
+note over T,WF: История и таймер сохраняются,\nзавершённая activity не повторяется при replay
+T -> WF: Timer fired; нет подтверждения
+WF -> T: Schedule SMS activity (до t0+5 с штатно)
+T -> A: SMS activity task
+A -> Policy: Актуальное разрешение
+Policy --> A: Permit
+A -> DB: CAS: не DELIVERED, один attempt S, не expired
+DB --> A: Разрешено
+A -> SMS: Send S со стабильным provider key
+SMS --> A: Accepted + provider ID
+A -> DB: Записать результат S
+note over A,SMS: При повторе activity — тот же attempt/key;\nUNKNOWN требует проверки, не слепого POST
+A -> T: Activity result
+SMS -> App: SMS
+SMS -> R: Signed receipt delivered S
+R -> DB: TX: inbox + DELIVERED + signal outbox
+R -> T: Receipt Signal из outbox
+T -> WF: Signal task
+WF -> T: Complete workflow
+opt Поздний push
+  Push -> App: Может дойти после SMS
+  App -> R: ACK P
+  R -> DB: Receipt audit; DELIVERED не откатывается
+end
+note over DB,App: Temporal не отменяет уже ушедшее сообщение\nи не гарантирует exactly-once внешнего канала
+@enduml

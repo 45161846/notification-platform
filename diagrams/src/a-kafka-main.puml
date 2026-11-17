@@ -1,0 +1,44 @@
+@startuml
+title Вариант 1: основная доставка push
+hide footbox
+skinparam defaultFontName SansSerif
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 180
+autonumber
+participant "Банковский сервис\nи его outbox" as Bank
+participant "API + Relay" as API
+database "Critical Ledger\nPostgreSQL HA" as DB
+queue Kafka
+participant "Orchestrator\nScheduler" as O
+participant "Channel Worker" as W
+participant "Policy Service" as Policy
+participant "Push provider" as Push
+actor "Приложение" as App
+participant "Receipt Receiver" as R
+Bank -> API: POST notification; стабильный event ID
+API -> DB: TX: unique key + notification + outbox
+DB --> API: Commit с sync replica
+API --> Bank: 202 + notification ID
+API -> Kafka: Outbox: notification accepted; acks=all
+Kafka -> O: Critical event (возможен повтор)
+O -> DB: TX: inbox + READY + due time
+O -> Kafka: Commit offset после SQL commit
+O -> DB: Due row: CAS generation + attempt + dispatch outbox
+API -> Kafka: Dispatch outbox
+Kafka -> W: Send attempt ID
+W -> Policy: Разрешение по актуальной политике
+Policy --> W: Permit + policy version + контакт
+W -> DB: CAS: не DELIVERED, актуальный attempt, не expired
+DB --> W: Разрешено; транзакция завершена
+W -> Push: Send(notification ID, attempt ID)
+Push --> W: Accepted + provider message ID
+W -> DB: Записать PROVIDER_ACCEPTED / deadline
+note over W,Push: Accepted ещё не означает DELIVERY_CONFIRMED
+Push -> App: Push
+App -> R: Аутентифицированный ACK(notification ID, attempt ID)
+R -> DB: TX: receipt inbox + DELIVERED + status outbox
+DB --> R: Commit
+R --> App: 200
+O -> DB: Старый таймер: DELIVERED => no-op
+note over DB,O: Новые разрешения резерва не выдаются
+@enduml

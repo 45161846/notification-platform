@@ -1,0 +1,50 @@
+@startuml
+title Вариант 1: push timeout → SMS, поздний ACK
+hide footbox
+skinparam defaultFontName SansSerif
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 180
+autonumber
+participant "Orchestrator\nScheduler" as O
+database "Critical Ledger" as DB
+participant "Outbox Relay" as Relay
+queue Kafka
+participant "Channel Worker" as W
+participant "Policy Service" as Policy
+participant "Push provider" as Push
+participant "SMS provider" as SMS
+participant "Receipt Receiver" as R
+actor "Клиент" as App
+note over O,App: Уведомление уже устойчиво принято в t0
+W -> Push: Push attempt P; HTTP timeout 1 с
+Push --> W: Accepted (не delivery)
+W -> DB: WAITING_CONFIRMATION; push deadline t0+4 с
+note over DB,App: ACK не пришёл; исход push может оставаться UNKNOWN
+O -> DB: До t0+5 с: due row; CAS по generation\nПроверить не DELIVERED, создать attempt S + outbox
+DB --> O: Commit; один новый dispatch разрешён
+Relay -> Kafka: Dispatch SMS attempt S
+Kafka -> W: Send S (повтор команды допустим)
+W -> Policy: Проверить разрешение и контакт
+Policy --> W: Permit
+W -> DB: Preflight S: не delivered/expired, актуальная generation
+DB --> W: Разрешено
+W -> SMS: Send S со стабильным provider_request_key
+alt Ответ получен
+  SMS --> W: Accepted + provider ID
+  W -> DB: WAITING_CONFIRMATION; SMS deadline
+else Ответ потерян
+  W -> DB: Attempt S = UNKNOWN
+  W -> SMS: Уточнить результат по ключу/ID, если API позволяет
+  note over W,SMS: Не повторять небезопасный POST вслепую
+end
+SMS -> App: SMS
+SMS -> R: Signed receipt: delivered S
+R -> DB: TX: inbox + DELIVERED + status outbox
+opt Поздний push / потерянный ранее ACK
+  Push -> App: Поздний push возможен
+  App -> R: ACK P
+  R -> DB: Идемпотентно записать receipt; не откатывать DELIVERED
+end
+O -> DB: SMS/email deadline: DELIVERED => no-op
+note over SMS,App: Уже отправленное SMS не отзывается.\nОстаточный межканальный повтор измеряется.
+@enduml

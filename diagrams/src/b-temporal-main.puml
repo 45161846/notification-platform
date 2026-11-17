@@ -1,0 +1,44 @@
+@startuml
+title Вариант 2: основная доставка через workflow
+hide footbox
+skinparam defaultFontName SansSerif
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 180
+autonumber
+participant "Банковский сервис" as Bank
+participant "API + Relay" as API
+database "Critical Ledger" as DB
+participant "Temporal Service\nи HA persistence" as T
+participant "Workflow Worker" as WF
+participant "Channel Activity" as A
+participant "Policy Service" as Policy
+participant "Push provider" as Push
+actor "Приложение" as App
+participant "Receipt Receiver\nи Signal Relay" as R
+Bank -> API: Событие из bank outbox
+API -> DB: TX: unique key + notification + start outbox
+DB --> API: Sync commit
+API --> Bank: 202 + notification ID
+API -> T: StartWorkflow(ID = notification ID), из outbox
+T --> API: Started / already exists
+T -> WF: Workflow task (после poll)
+WF -> T: Schedule push activity + durable ACK timer
+T -> A: Activity task (после poll)
+A -> Policy: Актуальное разрешение
+Policy --> A: Permit
+A -> DB: Preflight + стабильный attempt ID
+DB --> A: Разрешено
+A -> Push: Send(notification ID, attempt ID)
+Push --> A: Accepted + provider ID
+A -> DB: Записать результат
+A -> T: Activity result
+Push -> App: Push
+App -> R: Authenticated ACK
+R -> DB: TX: receipt inbox + DELIVERED + signal outbox
+DB --> R: Commit
+R --> App: 200
+R -> T: Receipt Signal; надёжный повтор из outbox
+T -> WF: Signal task
+WF -> T: Complete workflow; timer больше не запускает fallback
+note over DB,A: При задержке Signal следующая activity\nвсё равно увидит DELIVERED в ledger
+@enduml
